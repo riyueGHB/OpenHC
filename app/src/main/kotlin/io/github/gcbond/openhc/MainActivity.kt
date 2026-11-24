@@ -7,7 +7,6 @@ import android.content.pm.PackageManager
 import android.hardware.usb.UsbManager
 import android.os.Build
 import android.os.Bundle
-import android.util.Log
 import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.BackHandler
@@ -28,10 +27,12 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.core.content.ContextCompat
 import io.github.gcbond.openhc.audio.MicPermission
+import io.github.gcbond.openhc.connection.CarHome
 import io.github.gcbond.openhc.connection.ConnectionController
 import io.github.gcbond.openhc.connection.DeviceInfo
 import io.github.gcbond.openhc.connection.Notice
 import io.github.gcbond.openhc.connection.Phase
+import io.github.gcbond.openhc.platform.log.Log
 import io.github.gcbond.openhc.platform.net.VpnConsent
 import io.github.gcbond.openhc.settings.AppSettings
 import io.github.gcbond.openhc.settings.AudioPreferences
@@ -106,12 +107,18 @@ class MainActivity : ComponentActivity() {
 
     override fun onResume() {
         super.onResume()
+        CarHome.attach(this)
         // 记下底部导航栏的实际高度（不管此刻显不显示），「全屏显示」关时按它让出画面、算声明尺寸。
         window.decorView.post {
             val insets = androidx.core.view.ViewCompat.getRootWindowInsets(window.decorView) ?: return@post
             val bar = insets.getInsetsIgnoringVisibility(androidx.core.view.WindowInsetsCompat.Type.navigationBars()).bottom
             if (bar > 0) io.github.gcbond.openhc.connection.DisplayArea.measuredNavigationBarHeight = bar
         }
+    }
+
+    override fun onPause() {
+        CarHome.detach(this)
+        super.onPause()
     }
 
     /**

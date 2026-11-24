@@ -123,7 +123,7 @@ private fun SettingsLeftColumn(settings: AppSettings, screen: ScreenSpec) {
     MediaKeySettingsSection()
 }
 
-/** 右列：连接方式、启动、声音。 */
+/** 右列：连接方式、启动、声音、诊断。 */
 @Composable
 private fun SettingsRightColumn(
     settings: AppSettings,
@@ -132,6 +132,7 @@ private fun SettingsRightColumn(
 ) {
     SettingsGroup(stringResource(R.string.settings_group_connection)) {
         WiredOnlySetting(wireless)
+        WirelessModeSetting(wireless)
         BluetoothAddressSection(settings, systemBluetoothAddress)
         LePairingSetting()
         UsbAutoConnectSettingsSection()
@@ -139,6 +140,7 @@ private fun SettingsRightColumn(
     }
     BootStartSettingsSection(autoConnect = wireless.connectOnBluetooth && !wireless.wiredOnly) { ConnectOnBluetoothSetting(wireless) }
     AudioSettingsSection()
+    DiagnosticsSettingsSection()
 }
 
 /** 顶栏：「设置」、一句生效说明、右上「返回」。 */

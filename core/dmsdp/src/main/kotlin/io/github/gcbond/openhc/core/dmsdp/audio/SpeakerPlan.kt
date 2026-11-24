@@ -7,15 +7,30 @@ import java.security.MessageDigest
  * 车机本地用来认出「是哪台手机」的编号：手机设备信息（命令 101）里 deviceId 的 SHA-256 前 8 字节，16 位小写十六进制。
  * 只在车机本地记结果用，不上线；日志里只露前 6 位。
  */
-class PhoneRef(val key: String, val name: String?) {
+class PhoneRef(val key: String, val name: String?, val version: String? = null) {
     /** 日志里用的短编号。 */
     val shortKey: String get() = key.take(SHORT_KEY)
+
+    /**
+     * 按手机记传输方式时用的名单条目：编号加 HiCar 版本（`编号@版本`），版本不知道时只有编号。手机升级 HiCar 后条目对不上，
+     * 会重新试一次 TCP。
+     */
+    val listEntry: String get() = version?.let { "$key$VERSION_SEPARATOR$it" } ?: key
+
+    /** 在名单里：有这台手机这个版本的条目，或者只记了编号、没记版本的条目（旧条目，任何版本都算）。 */
+    fun listedIn(entries: Set<String>): Boolean = listEntry in entries || key in entries
 
     override fun toString() = "手机 编号 $shortKey"
 
     companion object {
         private const val KEY_BYTES = 8
         private const val SHORT_KEY = 6
+
+        /** 名单条目里编号和版本之间的分隔符。 */
+        const val VERSION_SEPARATOR = "@"
+
+        /** 名单条目 [entry] 是不是这台手机（编号 [key]）的，不管哪个版本。 */
+        fun entryOf(entry: String, key: String): Boolean = entry == key || entry.startsWith("$key$VERSION_SEPARATOR")
 
         /** 由手机的 deviceId 算编号。 */
         fun keyOf(deviceId: String): String =
@@ -46,7 +61,7 @@ enum class PcmVerdict(val label: String, val failure: Boolean) {
     /** 收到够多的、能放的 PCM 包。 */
     WORKS("PCM 能正常出声", false),
 
-    /** 手机发过焦点请求（想出声），但整个连接里一次数据会话都没开。 */
+    /** 手机要过长期焦点（想放歌），但整个连接里一次数据会话都没开。 */
     NO_DATA_SESSION("手机想出声，却始终没有开数据会话", true),
 
     /** 手机发来的 PCM 载荷不像声音（多半两边对编码的理解不一致），被静音不放。 */
@@ -58,9 +73,10 @@ enum class PcmVerdict(val label: String, val failure: Boolean) {
  *
  * - [PcmVerdict.WORKS]：收到 [WORKS_PACKETS] 个能放的 PCM 包（约 0.27 秒的声音）。
  * - [PcmVerdict.UNPLAYABLE]：识别时判定 PCM 载荷不像声音。
- * - [PcmVerdict.NO_DATA_SESSION]：连接结束时才判——手机发过焦点请求，整个连接里却没触发过一次数据会话，
- *   且从第一次请求到结束超过 [WINDOW_MILLIS]（太短的连接不下结论）。只看「始终没有」，不在中途下结论：
- *   手机先发一个短促的系统提示音、过一会儿才开数据会话放歌，不算失败。
+ * - [PcmVerdict.NO_DATA_SESSION]：连接结束时才判——手机要过长期焦点（放歌），整个连接里却没触发过一次数据会话，
+ *   且从第一次长期焦点请求到结束超过 [WINDOW_MILLIS]（太短的连接不下结论）。只看「始终没有」，不在中途下结论。
+ *   短暂焦点不算：手机连上时会要一下短暂焦点、马上放掉，不一定开数据会话；把它算进去，连上后没放歌、
+ *   超过窗口才断开的连接都会被误判成 PCM 不出声。
  */
 internal class PcmCheck(private val declaredPcm: Boolean) {
     private var firstRequestAt = -1L
@@ -69,8 +85,9 @@ internal class PcmCheck(private val declaredPcm: Boolean) {
     private var worksSent = false
     private var unplayableSent = false
 
-    fun onFocusRequest(nowMillis: Long) {
-        if (declaredPcm && firstRequestAt < 0) firstRequestAt = nowMillis
+    /** 手机要焦点；[focusType] 见 [PhoneAudioFocus.focusType]，只有长期焦点（1）算「想出声」。 */
+    fun onFocusRequest(focusType: Int?, nowMillis: Long) {
+        if (declaredPcm && focusType == LONG_TERM_FOCUS && firstRequestAt < 0) firstRequestAt = nowMillis
     }
 
     fun onTrigger() {
@@ -100,5 +117,6 @@ internal class PcmCheck(private val declaredPcm: Boolean) {
     companion object {
         const val WORKS_PACKETS = 50L
         const val WINDOW_MILLIS = 10_000L
+        private const val LONG_TERM_FOCUS = 1
     }
 }

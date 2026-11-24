@@ -7,7 +7,6 @@ import android.os.Handler
 import android.os.HandlerThread
 import android.os.Looper
 import android.os.SystemClock
-import android.util.Log
 import androidx.core.content.ContextCompat
 import io.github.gcbond.openhc.AppIntents
 import io.github.gcbond.openhc.IdentityLoader
@@ -25,6 +24,7 @@ import io.github.gcbond.openhc.core.session.SessionEvent
 import io.github.gcbond.openhc.core.session.SocketRunner
 import io.github.gcbond.openhc.core.session.VideoParameters
 import io.github.gcbond.openhc.input.MediaKeys
+import io.github.gcbond.openhc.platform.log.Log
 import io.github.gcbond.openhc.platform.media.VideoDecoder
 import io.github.gcbond.openhc.platform.net.VpnConsent
 import io.github.gcbond.openhc.platform.usb.PhoneUsbMode
@@ -289,7 +289,7 @@ class ConnectionController(context: Context) {
         val bluetooth = BluetoothAddressPolicy.choose(DeviceInfo.systemBluetoothAddress(), settings.manualBluetoothAddress)
         val fullScreen = settings.fullScreen
         val display = try {
-            DisplayPlan.resolve(DisplayArea.screenFor(app, fullScreen), ResolutionChoice.Auto, settings.fps)
+            DisplayPlan.resolve(DisplayArea.screenFor(app, fullScreen), ResolutionChoice.Auto, settings.fps, settings.uiScalePercent)
         } catch (e: IllegalArgumentException) {
             return block(Notice.StartFailed("屏幕参数不对：${e.message}"))
         }
@@ -329,7 +329,7 @@ class ConnectionController(context: Context) {
         Log.i(
             TAG,
             "第 ${current.id} 次连接：蓝牙地址来源 ${bluetooth.source}，deviceId ${config.deviceId.take(4)}…，" +
-                "画布 ${display.width}x${display.height}@${display.fps} dpi ${display.dpi} GOP ${display.gop}" +
+                "画布 ${display.width}x${display.height}@${display.fps} dpi ${display.dpi}（界面大小 ${settings.uiScalePercent}%）GOP ${display.gop}" +
                 "（全屏${if (DisplayArea.activeFullScreen) "开" else "关，让出底部导航栏 ${DisplayArea.navigationBarHeight(app)} 像素"}），控制端口 $port，" +
                 "已配对手机 ${trustStore.peerCount} 台，USB 授权宽限 ${grace}ms",
         )
@@ -398,6 +398,9 @@ class ConnectionController(context: Context) {
         var wired: WiredSession? = null
         var wiredEnded = false
         var replugRequired = false
+
+        /** 有线会话走到过「发 carInfo」或之后的状态：可能已经用掉了这次插入（有线会话没按时报结束时据此判断要不要拔线重插）。 */
+        var carInfoMaybeSent = false
         var touchNegotiated = false
         var keyNegotiated = false
         @Volatile
@@ -412,9 +415,13 @@ class ConnectionController(context: Context) {
         /** 等切换时手机已经连续拔下够久：拔线重插的要求已经满足，下一次不用再等。 */
         var replugSatisfied = false
 
-        /** 协议线程建、调度线程收尾时关。 */
+        /**
+         * 协议线程建、调度线程收尾时关，两边都在 [decoderLock] 里改。收尾在关执行器之前就置了 [tearingDown]：
+         * 执行器关闭超时、强行放弃时协议线程可能还在建解码器，靠这把锁保证建了的一定被收尾关掉，收尾之后不再建。
+         */
         @Volatile
         var videoDecoder: VideoDecoder? = null
+        val decoderLock = Any()
 
         /** 解码器选项（上屏节拍开关），开始连接时在调度线程上读一次设置。 */
         val videoOptions: VideoDecoder.Options = VideoPreferences(app).decoderOptions()
@@ -447,10 +454,13 @@ class ConnectionController(context: Context) {
     }
 
     private fun prepareDecoder(current: Attempt, video: VideoParameters) {
-        val decoder = current.videoDecoder ?: VideoDecoder(DecoderListener(current.id), current.videoOptions).also {
-            current.videoDecoder = it
-            current.sink.target = it
-            mutableDecoder.value = it
+        val decoder = synchronized(current.decoderLock) {
+            if (current.tearingDown) return
+            current.videoDecoder ?: VideoDecoder(DecoderListener(current.id), current.videoOptions).also {
+                current.videoDecoder = it
+                current.sink.target = it
+                mutableDecoder.value = it
+            }
         }
         decoder.prepare(video.width, video.height, video.fps)
     }
@@ -480,6 +490,8 @@ class ConnectionController(context: Context) {
                 current.inputReady = current.touchNegotiated && !current.tearingDown
                 if (current.keyNegotiated && !current.tearingDown) MediaKeys.ready(app, current.keys)
             }
+            is SessionEvent.DeviceSessionReady -> CarHome.onDeviceSessionReady()
+            SessionEvent.ProjectionPaused -> CarHome.onProjectionPaused("有线 #${current.id}")
             is SessionEvent.Ended -> if (current.tearingDown) maybeFinish(current) else teardown(current)
             else -> Unit
         }
@@ -516,6 +528,11 @@ class ConnectionController(context: Context) {
     private fun onWiredState(current: Attempt, state: WiredState) {
         if (current !== attempt || current.finished) return
         state.toProgress()?.let { apply(ConnectionSignal.Wired(it)) }
+        if (state is WiredState.SendingCarInfo || state is WiredState.WaitingForPhoneSwitch ||
+            state is WiredState.OpeningNetwork || state is WiredState.Connected
+        ) {
+            current.carInfoMaybeSent = true
+        }
         current.waitingForSwitch = state is WiredState.WaitingForPhoneSwitch
         if (current.waitingForSwitch) watchUnplugWhileSwitching(current)
         if (state is WiredState.Ended) {
@@ -596,11 +613,13 @@ class ConnectionController(context: Context) {
         // 声音：执行器已经停了，不会再有音频回调。
         current.audio.close()
         current.mic.close()
-        // 2. 解码器：执行器已经停了，不会再有帧送进来。
-        current.sink.target = null
-        current.videoDecoder?.close()
-        current.videoDecoder = null
-        mutableDecoder.value = null
+        // 2. 解码器：执行器停了就不会再有帧送进来；关闭超时、强行放弃时协议线程可能还在建，见 [Attempt.decoderLock]。
+        val decoder = synchronized(current.decoderLock) {
+            current.sink.target = null
+            mutableDecoder.value = null
+            current.videoDecoder.also { current.videoDecoder = null }
+        }
+        decoder?.close()
         // 3. 有线链路：稍等一下，让 TEARDOWN 和关连接的包经 TUN、USB 发到手机，再停。
         val wired = current.wired
         if (wired != null && !current.wiredEnded) {
@@ -609,6 +628,8 @@ class ConnectionController(context: Context) {
                 if (!current.finished && !current.wiredEnded) {
                     Log.w(TAG, "有线会话 ${WIRED_STOP_TIMEOUT_MS / 1000} 秒内没有结束，不再等（下次开始可能报「已有有线会话」）")
                     current.wiredEnded = true
+                    // 它的结束报告之后才到也没人收了：发 carInfo 时就当这次插入已经用掉，宁可多要一次拔线重插。
+                    current.replugRequired = current.carInfoMaybeSent
                     maybeFinish(current)
                 }
             }, WIRED_STOP_TIMEOUT_MS)

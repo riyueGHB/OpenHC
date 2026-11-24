@@ -8,12 +8,12 @@ import android.os.Build
 import android.os.Handler
 import android.os.HandlerThread
 import android.os.SystemClock
-import android.util.Log
 import android.view.Choreographer
 import android.view.Surface
 import io.github.gcbond.openhc.core.common.MalformedMessageException
 import io.github.gcbond.openhc.core.hisight.AccessUnit
 import io.github.gcbond.openhc.core.hisight.AccessUnitSink
+import io.github.gcbond.openhc.platform.log.Log
 import java.io.Closeable
 import java.io.IOException
 import java.nio.ByteBuffer

@@ -3,7 +3,6 @@ package io.github.gcbond.openhc.ui
 import android.content.Context
 import android.os.Handler
 import android.os.Looper
-import android.util.Log
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -36,6 +35,7 @@ import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import io.github.gcbond.openhc.R
+import io.github.gcbond.openhc.platform.log.Log
 import io.github.gcbond.openhc.platform.media.AudioPreview
 import io.github.gcbond.openhc.platform.media.AudioStreamChoice
 import io.github.gcbond.openhc.platform.media.AudioUsage

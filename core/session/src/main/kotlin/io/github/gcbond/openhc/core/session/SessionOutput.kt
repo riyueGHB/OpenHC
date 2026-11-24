@@ -102,6 +102,20 @@ sealed class SessionAction : SessionOutput {
         override fun toString() = "OpenUdp($id, ${channel.name}, $localHost → $remoteHost:$remotePort)"
     }
 
+    /**
+     * 开 UDP socket [id]：绑 [localHost]:[localPort]，不 connect，收任意来源的数据报（音频数据会话走 UDP 时手机往这里发）。
+     * 绑好后调 [SessionLogic.onListening]（端口是实际绑上的）；收到的数据报交 [SessionLogic.onDatagram]；
+     * 绑不上或收发出错调 [SessionLogic.onIoError]。
+     */
+    class BindUdp(
+        override val id: Int,
+        val channel: SessionChannel,
+        val localHost: String,
+        val localPort: Int,
+    ) : SessionAction() {
+        override fun toString() = "BindUdp($id, ${channel.name}, $localHost:$localPort)"
+    }
+
     /** 经 UDP socket [id] 发一个数据报（已是完整的线上字节）。 */
     class SendDatagram(override val id: Int, val bytes: ByteArray) : SessionAction() {
         override fun toString() = "SendDatagram($id, ${bytes.size} 字节)"
@@ -182,6 +196,14 @@ sealed class SessionEvent : SessionOutput {
     /** 收到第一帧视频：开始出画面。帧本身经 [io.github.gcbond.openhc.core.hisight.AccessUnitSink] 交出。 */
     class VideoStarted(val video: VideoParameters?) : SessionEvent() {
         override fun toString() = "VideoStarted($video)"
+    }
+
+    /**
+     * 手机暂停了投屏显示服务（设备服务状态通知里显示服务的「暂停」）：用户在投屏界面上点了「车机」图标，要回车机自己的桌面。
+     * 连接照常保持；车机界面在前台时应退回桌面。刚连上时手机可能也发一次（启动竞态），由界面层按时间过滤。
+     */
+    object ProjectionPaused : SessionEvent() {
+        override fun toString() = "ProjectionPaused"
     }
 
     /** 不影响会话继续的信息：各层没处理的消息、被丢弃的数据、被忽略的请求等。[message] 可以直接写日志。 */

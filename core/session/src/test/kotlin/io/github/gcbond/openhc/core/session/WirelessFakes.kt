@@ -1,5 +1,6 @@
 package io.github.gcbond.openhc.core.session
 
+import io.github.gcbond.openhc.core.nearby.WifiMode
 import io.github.gcbond.openhc.core.auth.InMemoryTrustStore
 import io.github.gcbond.openhc.core.nearby.DataChannelRefusal
 import io.github.gcbond.openhc.core.nearby.NearbySession
@@ -27,6 +28,10 @@ internal object WirelessSynthetic {
     /** 平台开好的热点：网络名、BSSID、口令都是合成值。 */
     fun hotspot(frequencyMhz: Int = 5745, localIp: String = HOTSPOT_IP) =
         WifiNetwork(localIp, "OpenHC-5678", "0A:1B:2C:3D:4E:5F", HOTSPOT_PASSPHRASE, frequencyMhz)
+
+    /** 车机建的直连组（组主地址 192.168.49.1）。 */
+    fun direct(frequencyMhz: Int = 5745) =
+        WifiNetwork("192.168.49.1", "DIRECT-ab-OpenHC", "0A:1B:2C:3D:4E:5F", HOTSPOT_PASSPHRASE, frequencyMhz, WifiMode.DIRECT)
 
     /** 手机能力：组主、组成员都行，2.4G、5G 都支持，9 个 5G 信道全有，当前没连 WiFi。 */
     fun capability(channels: Collection<Int> = WifiChannels.CHANNELS_5G) = WifiCapability(

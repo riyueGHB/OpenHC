@@ -26,4 +26,4 @@ labels: ''
 
 **出问题的时间**：
 
-**日志**：能接 ADB 的话，附上 `adb logcat -v time | grep OpenHC-` 的输出
+**诊断日志**：0.2.1 起，在 OpenHC「设置 → 诊断 → 导出诊断日志」，把生成的文件拖到这里（安卓 10 起在「下载/OpenHC」文件夹）；更早的版本能接 ADB 的话，附上 `adb logcat -v time | grep OpenHC-` 的输出

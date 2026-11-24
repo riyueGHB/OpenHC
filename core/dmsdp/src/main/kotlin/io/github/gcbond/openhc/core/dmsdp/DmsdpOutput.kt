@@ -1,5 +1,6 @@
 package io.github.gcbond.openhc.core.dmsdp
 
+import io.github.gcbond.openhc.core.dmsdp.audio.AudioTransport
 import io.github.gcbond.openhc.core.common.toHex
 import kotlinx.serialization.json.JsonObject
 
@@ -76,12 +77,14 @@ sealed class DmsdpAction : DmsdpOutput {
     }
 
     /**
-     * 为手机触发的音频数据会话在本机地址上开一个 TCP 监听（数据端口 P，SETUP 里写成 `client_port=P--1`）。
+     * 为手机触发的音频数据会话在本机地址上开数据端口 P（SETUP 里写成 `client_port=P--1`）：[transport] 是 TCP 时开 TCP
+     * 监听，手机连上来的连接是 [DmsdpChannel.AUDIO]；是 UDP 时在 P 上收 UDP 数据报，手机直接往 P 发，每个数据报是
+     * 完整的一帧（外壳和 TCP 时相同），第一个数据报到达时调 [DmsdpSession.onConnected]，之后按到达顺序 [DmsdpSession.feed]。
      * 开好后调 [DmsdpSession.audioListenersReady]，开不了调 [DmsdpSession.audioListenersFailed]。
-     * 手机连上来的连接是 [DmsdpChannel.AUDIO]。之前的音频监听和连接已经先要求关掉了。
+     * 之前的音频监听和连接已经先要求关掉了。
      */
-    object OpenAudioListeners : DmsdpAction() {
-        override fun toString() = "OpenAudioListeners"
+    class OpenAudioListeners(val transport: AudioTransport) : DmsdpAction() {
+        override fun toString() = "OpenAudioListeners(${transport.label})"
     }
 
     /** 关掉当前音频数据会话的全部监听和连接（数据会话已拆除或被替换）。 */
@@ -214,7 +217,23 @@ sealed class DmsdpEvent : DmsdpOutput {
      * 以及没开文件分享时的 module 1 / type 17。要回复时用 [DmsdpSession.sendDeviceData]。
      */
     class UnhandledDeviceData(val module: Long, val type: Int, val data: ByteArray) : DmsdpEvent() {
-        override fun toString() = "UnhandledDeviceData(module=$module, type=$type, ${data.size} 字节)"
+        override fun toString() = "UnhandledDeviceData(module=$module, type=$type, ${data.size} 字节：${preview(data)})"
+
+        private companion object {
+            const val PREVIEW_BYTES = 160
+            val LONG_TOKEN = Regex("[0-9A-Za-z+/=_-]{24,}")
+
+            /** 内容开头（多半是 JSON 文本）：不可打印字节换成点，长串隐去，免得把标识写进日志。 */
+            fun preview(data: ByteArray): String {
+                val text = buildString {
+                    for (i in 0 until minOf(data.size, PREVIEW_BYTES)) {
+                        val c = data[i].toInt() and 0xFF
+                        append(if (c in 0x20..0x7E) c.toChar() else '.')
+                    }
+                }.replace(LONG_TOKEN) { "<隐去 ${it.value.length} 字符>" }
+                return if (data.size > PREVIEW_BYTES) "$text…" else text
+            }
+        }
     }
 
     // ---------- 音频数据会话（详情经 [io.github.gcbond.openhc.core.dmsdp.audio.AudioStreamListener] 交出）----------

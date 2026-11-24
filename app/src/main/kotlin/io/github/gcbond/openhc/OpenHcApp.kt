@@ -3,6 +3,7 @@ package io.github.gcbond.openhc
 import android.app.Application
 import io.github.gcbond.openhc.connection.ConnectionController
 import io.github.gcbond.openhc.connection.Phase
+import io.github.gcbond.openhc.diagnostics.LogRecorder
 import io.github.gcbond.openhc.startup.BootStart
 import io.github.gcbond.openhc.startup.ProjectionSurfacer
 import io.github.gcbond.openhc.wireless.LePairingNames
@@ -23,6 +24,7 @@ class OpenHcApp : Application() {
             },
             stopWiredWaiting = { connection.stop() },
             resumeWiredWaiting = { connection.start() },
+            phoneOnCable = { BootStart.phonePlugged(this) },
         ).also { controller ->
             controller.addHostListener { surfacer.onStateChanged() }
         }
@@ -42,6 +44,8 @@ class OpenHcApp : Application() {
 
     override fun onCreate() {
         super.onCreate()
+        // 一启动就开始记自己的日志（「设置 → 诊断 → 导出诊断日志」用），越早越能把启动过程记全。
+        LogRecorder.start(this)
         registerActivityLifecycleCallbacks(uiVisibility)
         // 有线开始时无线让出等回连，有线结束后无线再回到等待。
         connection.addHostListener {

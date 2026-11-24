@@ -191,7 +191,7 @@ class AudioDepacketizerTest {
         assertTrue(recorder.notes.any { "新的一路" in it })
     }
 
-    /** SSRC 高 16 位带着用途时：路号取低 16 位，用途原样交出。 */
+    /** SSRC 高 16 位带着用途时：路号取低 12 位，用途原样交出。 */
     @Test
     fun usageBitsInTheSsrcAreSplitFromTheBus() {
         val call = 0x0002_03EAL
@@ -372,6 +372,57 @@ class AudioDepacketizerTest {
         assertEquals(AudioCodec.AAC, recorder.framing?.payloadCodec, "帧长小于载荷长也算 ADTS")
     }
 
+    /**
+     * ADTS 帧前带 12 字节头（和 PCM 的头一样，分流时包尾多几个字节）：认成 AAC，只交出头后的 ADTS 帧。
+     * 帧长有奇有偶；要的是 PCM 也一样走 AAC；载荷再加一层密也认得出。
+     */
+    @Test
+    fun adtsBehindThePayloadHeaderIsAacWithTheHeaderStripped() {
+        val random = Random(13)
+        for (asked in AudioCodec.entries) for (payloadSealed in listOf(false, true)) {
+            val units = listOf(300, 317, 288, 301, 299).map { AudioSynthetic.adts(ByteArray(it).also { b -> random.nextBytes(b) }) }
+            var bytes = ByteArray(0)
+            units.forEachIndexed { i, unit ->
+                val headed = AudioSynthetic.pcmHeader(timestamp = i * 1_024L, dataLength = unit.size) + unit + byteArrayOf(1, 2, 3, 4)
+                val payload = if (payloadSealed) AudioSynthetic.seal(headed, 30 + i) else headed
+                bytes += AudioSynthetic.frame(FrameKind.LENGTH32, AudioSynthetic.rtp(i, payload))
+            }
+            val recorder = Recorder()
+            val depacketizer = depacketizer(recorder, AudioSynthetic.stream(codec = asked))
+            depacketizer.feedInPieces(bytes)
+            val label = "要 $asked，载荷加密 $payloadSealed"
+            val framing = assertNotNull(recorder.framing, label)
+            assertEquals(AudioCodec.AAC, framing.payloadCodec, label)
+            assertEquals(payloadSealed, framing.payloadEncrypted, label)
+            assertTrue(framing.playable, label)
+            assertEquals(units.size, recorder.payloads.size, label)
+            units.forEachIndexed { i, unit -> assertContentEquals(unit, recorder.payloads[i], "$label：第 $i 包只剩 ADTS 帧") }
+            assertEquals(units.size.toLong(), depacketizer.aacHeadersStripped, label)
+            assertEquals(0L, depacketizer.pcmHeadersStripped, label)
+            assertEquals(1, recorder.notes.count { "AAC 载荷前有 12 字节头" in it }, label)
+            assertTrue("AAC 载荷去掉 12 字节头" in depacketizer.conclusion, label)
+        }
+    }
+
+    @Test
+    fun payloadHeaderRules() {
+        val unit = AudioSynthetic.adts(ByteArray(250)) // 帧长 257，奇数
+        val headed = AudioSynthetic.pcmHeader(timestamp = 7, dataLength = unit.size) + unit
+        assertEquals(unit.size, PayloadHeader.adtsLength(headed, 0, headed.size))
+        assertEquals(-1, PayloadHeader.pcmLength(headed, 0, headed.size), "PCM 的长度必须是偶数")
+        val tail = headed + ByteArray(PayloadHeader.MAX_TRAILER)
+        assertEquals(unit.size, PayloadHeader.adtsLength(tail, 0, tail.size), "包尾多出上限以内的字节")
+        val tooLong = tail + byteArrayOf(0)
+        assertEquals(-1, PayloadHeader.adtsLength(tooLong, 0, tooLong.size), "包尾多出超过上限")
+        val mismatch = AudioSynthetic.pcmHeader(timestamp = 7, dataLength = unit.size + 1) + unit + byteArrayOf(0)
+        assertEquals(-1, PayloadHeader.adtsLength(mismatch, 0, mismatch.size), "ADTS 帧长和头里的长度不一样")
+        assertEquals(-1, PayloadHeader.adtsLength(unit, 0, unit.size), "不带头的 ADTS")
+        val pcm = AudioSynthetic.pcm(0, frames = 64)
+        val headedPcm = AudioSynthetic.pcmHeader(timestamp = 7, dataLength = pcm.size) + pcm
+        assertEquals(pcm.size, PayloadHeader.pcmLength(headedPcm, 0, headedPcm.size))
+        assertEquals(-1, PayloadHeader.adtsLength(headedPcm, 0, headedPcm.size), "头后不是 ADTS")
+    }
+
     @Test
     fun adtsHeaderCheck() {
         val unit = AudioSynthetic.adts(ByteArray(3))
@@ -467,6 +518,111 @@ class AudioDepacketizerTest {
         assertTrue(recorder.payloads.all { it.size == 1024 }, "只放声明的 1024 字节：${recorder.payloads.map { it.size }}")
         assertEquals(0, depacketizer.pcmWithoutHeader)
         assertEquals(1, recorder.notes.count { "包尾" in it && "多 4 字节" in it }, "尾巴只提示一次")
+    }
+
+    /**
+     * 带包尾路号的一包载荷：12 字节头（第 1 字节位置标记、第 2～3 字节 `01 01`、第 5 字节组内序号、第 10～11 字节数据长度）
+     * + 256 帧 PCM + 4 字节小端路号。数值都是合成的。
+     */
+    private fun markedPcm(index: Int, trailerBus: Int): ByteArray {
+        val data = AudioSynthetic.pcm(index * 256, frames = 256)
+        val header = ByteArray(PayloadHeader.SIZE)
+        header[1] = (if (index % 4 == 0) 1 else 2).toByte()
+        header[2] = 1
+        header[3] = 1
+        header[5] = (index % 4).toByte()
+        header[10] = (data.size ushr 8).toByte()
+        header[11] = data.size.toByte()
+        val trailer = ByteArray(PayloadHeader.TRAILER_BUS_BYTES) { (trailerBus ushr (8 * it)).toByte() }
+        return header + data + trailer
+    }
+
+    @Test
+    fun trailerBusRules() {
+        val payload = markedPcm(0, 0x0102)
+        assertEquals(0x0102L, PayloadHeader.trailerBus(payload, 0, payload.size), "小端")
+        val shifted = byteArrayOf(7, 7) + payload
+        assertEquals(0x0102L, PayloadHeader.trailerBus(shifted, 2, payload.size), "按偏移读")
+        val wrongLength = payload.copyOf().also { it[11] = 0x10 }
+        assertEquals(0x0102L, PayloadHeader.trailerBus(wrongLength, 0, wrongLength.size), "头里声明的长度不作数")
+        val unmarked = payload.copyOf().also { it[3] = 0 }
+        assertEquals(-1, PayloadHeader.trailerBus(unmarked, 0, unmarked.size), "第 3 字节为 0：没有包尾路号")
+        val otherMark = payload.copyOf().also { it[2] = 2 }
+        assertEquals(-1, PayloadHeader.trailerBus(otherMark, 0, otherMark.size), "第 2 字节不是 1")
+        val notHeader = payload.copyOf().also { it[0] = 5 }
+        assertEquals(-1, PayloadHeader.trailerBus(notHeader, 0, notHeader.size), "第 0 字节不是 0：不是头")
+        val noPosition = payload.copyOf().also { it[1] = 0 }
+        assertEquals(-1, PayloadHeader.trailerBus(noPosition, 0, noPosition.size), "第 1 字节不在 1～3：不是头")
+        assertEquals(-1, PayloadHeader.trailerBus(payload, 0, PayloadHeader.SIZE + 3), "装不下头和包尾")
+        assertEquals(0L, PayloadHeader.trailerBus(payload.copyOf(PayloadHeader.SIZE + 4), 0, PayloadHeader.SIZE + 4), "只有头和包尾")
+    }
+
+    /**
+     * 带包尾路号时按包尾分路：同一个 SSRC 上包尾路号不同是两路，各自计序号、不算跳变；路号（选声道用的）也按包尾。
+     * SSRC 在带不带附加标志位（第 14 位）之间来回换不影响。
+     */
+    @Test
+    fun trailerBusDecidesTheLaneAndTheBus() {
+        val plain = 0x0001_03EBL
+        val flagged = 0x0001_43EBL
+        // SSRC、序号、包尾路号
+        val order = listOf(
+            Triple(plain, 2540, 8), Triple(plain, 2541, 8), Triple(plain, 2542, 8), Triple(plain, 2543, 8),
+            Triple(flagged, 0, 0), Triple(flagged, 1, 0), Triple(flagged, 2544, 8), Triple(flagged, 2545, 8),
+            Triple(flagged, 2, 0), Triple(flagged, 3, 0), Triple(plain, 2546, 8), Triple(flagged, 2547, 8),
+        )
+        var bytes = ByteArray(0)
+        order.forEachIndexed { i, (ssrc, sequence, bus) ->
+            bytes += AudioSynthetic.frame(FrameKind.LENGTH32, AudioSynthetic.rtp(sequence, markedPcm(i, bus), ssrc = ssrc))
+        }
+        val recorder = Recorder()
+        val depacketizer = depacketizer(recorder)
+        depacketizer.feedInPieces(bytes)
+        assertNotNull(recorder.framing, recorder.unknownReason)
+        assertEquals(order.map { it.second }, recorder.sequences)
+        assertEquals(order.map { 1000L + it.third }, recorder.lanes)
+        assertEquals(order.map { it.third }, recorder.buses, "路号按包尾，不按 SSRC 里的第 3 路")
+        assertEquals(0, depacketizer.sequenceGaps, "两路交替不算跳变")
+        assertTrue(recorder.payloads.all { it.size == 1024 }, "头和包尾都不进声音数据")
+        assertEquals(order.size.toLong(), depacketizer.trailerBusPackets)
+        assertEquals(0L, depacketizer.pcmHeadersStripped)
+        assertTrue("第 8 路 8 包" in depacketizer.streams, depacketizer.streams)
+        assertTrue("第 0 路 4 包" in depacketizer.streams, depacketizer.streams)
+        assertEquals(1, recorder.notes.count { "末尾 4 字节是这一路的路号" in it }, "规则只提示一次")
+        assertEquals(2, recorder.notes.count { it.startsWith("出现一路：") }, recorder.notes.toString())
+        assertTrue(recorder.notes.any { "出现一路：第 8 路（包尾路号 8；SSRC $plain，SSRC 里是第 3 路）" in it }, recorder.notes.toString())
+        assertTrue(recorder.notes.none { "SSRC 的路号变了" in it }, "低 12 位没变")
+    }
+
+    /** 包尾路号相同、SSRC 的低 12 位变了：还是同一路（一个播放器、序号接着算），提示一次。 */
+    @Test
+    fun sameTrailerBusWithAnotherSsrcIsTheSameLane() {
+        val ssrcs = List(4) { 0x0001_03EBL } + listOf(0x0010_0408L, 0x0010_0408L, 0x0001_03EBL, 0x0010_0408L)
+        var bytes = ByteArray(0)
+        ssrcs.forEachIndexed { i, ssrc -> bytes += AudioSynthetic.frame(FrameKind.LENGTH32, AudioSynthetic.rtp(100 + i, markedPcm(i, 8), ssrc = ssrc)) }
+        val recorder = Recorder()
+        val depacketizer = depacketizer(recorder)
+        depacketizer.feedInPieces(bytes)
+        assertNotNull(recorder.framing, recorder.unknownReason)
+        assertEquals(List(ssrcs.size) { 1008L }, recorder.lanes)
+        assertEquals(0, depacketizer.sequenceGaps)
+        assertEquals(1, recorder.notes.count { "第 8 路里 SSRC 的路号变了：第 3 路 → 第 32 路" in it }, recorder.notes.toString())
+    }
+
+    /** 带包尾路号的包，头里声明的长度和实际对不上：按实际的放（头和包尾之间全是数据），提示一次。 */
+    @Test
+    fun trailerBusPacketIgnoresTheDeclaredLength() {
+        var bytes = ByteArray(0)
+        for (i in 0 until 6) {
+            val payload = markedPcm(i, 0).also { it[10] = 0; it[11] = 0x40 }
+            bytes += AudioSynthetic.frame(FrameKind.LENGTH32, AudioSynthetic.rtp(i, payload))
+        }
+        val recorder = Recorder()
+        val depacketizer = depacketizer(recorder)
+        depacketizer.feedInPieces(bytes)
+        assertNotNull(recorder.framing, recorder.unknownReason)
+        assertTrue(recorder.payloads.all { it.size == 1024 }, recorder.payloads.map { it.size }.toString())
+        assertEquals(1, recorder.notes.count { "头里声明 64 字节、实际数据 1024 字节" in it }, recorder.notes.toString())
     }
 
     /** 头部每 500 包抽一包记下来；中途有包对不上规则时提示一次、原样放。 */

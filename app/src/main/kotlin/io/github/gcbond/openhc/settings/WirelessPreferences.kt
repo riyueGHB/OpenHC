@@ -2,6 +2,8 @@ package io.github.gcbond.openhc.settings
 
 import android.content.Context
 import androidx.core.content.edit
+import io.github.gcbond.openhc.platform.wifi.CarHotspotSettings
+import io.github.gcbond.openhc.platform.wifi.WifiBand
 
 /**
  * 无线连接方式与自动连接手机的设置（单独一个 SharedPreferences 文件）。开关切换立即生效。
@@ -25,6 +27,49 @@ class WirelessPreferences(context: Context) {
     var connectOnBluetooth: Boolean
         get() = prefs.getBoolean(KEY_CONNECT_ON_BLUETOOTH, true)
         set(value) = prefs.edit { putBoolean(KEY_CONNECT_ON_BLUETOOTH, value) }
+
+    /**
+     * 无线方式选「WiFi 直连」（默认关，即车机开热点；试验）：手机认证通过后车机建 WiFi 直连组让手机加入、不开本地热点，
+     * 优先 5 GHz。下一次无线连接生效（见 [usesWifiDirect]）。
+     */
+    var wifiDirect: Boolean
+        get() = prefs.getBoolean(KEY_WIFI_DIRECT, false)
+        set(value) = prefs.edit { putBoolean(KEY_WIFI_DIRECT, value) }
+
+    /** 下一次无线连接真的走 WiFi 直连：选了直连（没选车机自带热点），而且系统支持（[wifiDirectSupported]）。 */
+    val usesWifiDirect: Boolean get() = wifiDirect && !carHotspot && wifiDirectSupported
+
+    /**
+     * 无线方式选「车机自带热点」（试验，默认关）：车主先在车机设置里打开车机自带的热点，OpenHC 不开本地热点，
+     * 用车主填的热点名、密码和频段（[carHotspotSettings]）。和 [wifiDirect] 二选一，设置页保证只开一个。
+     */
+    var carHotspot: Boolean
+        get() = prefs.getBoolean(KEY_CAR_HOTSPOT, false)
+        set(value) = prefs.edit { putBoolean(KEY_CAR_HOTSPOT, value) }
+
+    /** 车机自带热点的名称（车主填的，原样）。 */
+    var carHotspotName: String
+        get() = prefs.getString(KEY_CAR_HOTSPOT_NAME, null).orEmpty()
+        set(value) = prefs.edit { putString(KEY_CAR_HOTSPOT_NAME, value) }
+
+    /** 车机自带热点的密码（车主填的，原样；不写日志）。 */
+    var carHotspotPassword: String
+        get() = prefs.getString(KEY_CAR_HOTSPOT_PASSWORD, null).orEmpty()
+        set(value) = prefs.edit { putString(KEY_CAR_HOTSPOT_PASSWORD, value) }
+
+    /** 车机自带热点开在 5 GHz（默认）还是 2.4 GHz：报给手机的频率按它推测。 */
+    var carHotspotFiveGhz: Boolean
+        get() = prefs.getBoolean(KEY_CAR_HOTSPOT_5G, true)
+        set(value) = prefs.edit { putBoolean(KEY_CAR_HOTSPOT_5G, value) }
+
+    /** 下一次无线连接用的车机自带热点；没选这种方式、或名称密码没填时为 null。 */
+    fun carHotspotSettings(): CarHotspotSettings? {
+        if (!carHotspot) return null
+        val name = carHotspotName
+        val password = carHotspotPassword
+        if (name.isEmpty() || password.isEmpty()) return null
+        return CarHotspotSettings(name, password, if (carHotspotFiveGhz) WifiBand.GHZ_5 else WifiBand.GHZ_2)
+    }
 
     /** 用无线连成功过（投屏开始过）的手机的蓝牙地址（大写），最近连成功的在最后。「自动连接手机」只拨这些手机。 */
     val knownPhoneList: List<String>
@@ -83,12 +128,23 @@ class WirelessPreferences(context: Context) {
 
         private const val FILE = "openhc-wireless"
         private const val KEY_WIRED_ONLY = "wired_only"
+        private const val KEY_WIFI_DIRECT = "wifi_direct"
+        private const val KEY_CAR_HOTSPOT = "car_hotspot"
+        private const val KEY_CAR_HOTSPOT_NAME = "car_hotspot_name"
+        private const val KEY_CAR_HOTSPOT_PASSWORD = "car_hotspot_password"
+        private const val KEY_CAR_HOTSPOT_5G = "car_hotspot_5g"
         private const val KEY_CONNECT_ON_BLUETOOTH = "connect_on_bluetooth"
         private const val KEY_AUTO_RECONNECT = "auto_reconnect"
         private const val KEY_KNOWN_PHONES = "known_phones"
 
         /** 「连成功过的手机」最多记几台。 */
         const val MAX_KNOWN_PHONES = 5
+
+        /**
+         * 系统支持「WiFi 直连」这种无线方式：要按指定频率建组。安卓 10 起有公开接口；安卓 6～9 靠系统内部的设信道接口，
+         * 有的车机不认，建组时会明说（见 WifiDirectGroupOwner）。所以 OpenHC 支持的系统（安卓 6 起）都算支持。
+         */
+        val wifiDirectSupported: Boolean get() = true
         private const val KEY_REPUBLISH_SECONDS = "debug_beacon_republish_seconds"
         private const val KEY_RANDOM_ADDRESS = "debug_beacon_random_address"
         private const val KEY_GATT = "debug_beacon_gatt"

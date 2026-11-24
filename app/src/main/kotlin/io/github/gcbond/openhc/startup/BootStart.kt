@@ -8,12 +8,12 @@ import android.hardware.usb.UsbManager
 import android.net.Uri
 import android.os.Build
 import android.provider.Settings
-import android.util.Log
 import androidx.core.content.ContextCompat
 import androidx.core.content.edit
 import androidx.core.net.toUri
 import io.github.gcbond.openhc.MainActivity
 import io.github.gcbond.openhc.connection.UsbAutoConnect
+import io.github.gcbond.openhc.platform.log.Log
 import io.github.gcbond.openhc.platform.usb.PhoneUsbMode
 import io.github.gcbond.openhc.platform.usb.UsbDescriber
 import io.github.gcbond.openhc.settings.WirelessPreferences

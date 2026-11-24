@@ -7,6 +7,7 @@ import io.github.gcbond.openhc.core.dmsdp.DmsdpChannel
 import io.github.gcbond.openhc.core.dmsdp.DmsdpEvent
 import io.github.gcbond.openhc.core.dmsdp.DmsdpOutput
 import io.github.gcbond.openhc.core.dmsdp.audio.AudioStreamListener
+import io.github.gcbond.openhc.core.dmsdp.audio.AudioTransport
 import io.github.gcbond.openhc.core.dmsdp.audio.CarAudioFocus
 import io.github.gcbond.openhc.core.dmsdp.audio.MicStreamListener
 import io.github.gcbond.openhc.core.hisight.AccessUnitSink
@@ -112,6 +113,10 @@ class ReceiverSession internal constructor(
     private var audioPort = 0
     private var audioAttempts = 0
 
+    /** 这次音频数据会话走 UDP（数据端口收数据报，不 accept）；收到过第一个数据报。 */
+    private var audioUdp = false
+    private var audioUdpHeard = false
+
     /** 麦克风数据会话的监听；它接受的连接（手机连进来）是 [Endpoint.accept]。 */
     private var micListener: Endpoint? = null
 
@@ -129,6 +134,9 @@ class ReceiverSession internal constructor(
 
     /** 认证给的 16 字节会话密钥：交给 dmsdp 和 hisight（它们各自复制）后清零。 */
     private var sessionKey: ByteArray? = null
+
+    /** 手机报的 HiCar 版本：有线来自自己的认证，无线来自蓝牙上的认证（[ControlLink.phoneVersion]）。 */
+    private var phoneVersion: String? = link.phoneVersion
 
     /** 等认证监听开好的业务 19 请求。 */
     private val pendingAuthRequests = ArrayList<NearbyOutput.SocketRequest>()
@@ -197,7 +205,8 @@ class ReceiverSession internal constructor(
 
     override fun onListening(id: Int, port: Int, nowMillis: Long): List<SessionOutput> = session { out ->
         val ep = endpoints[id] ?: return@session
-        if (ep.kind != Kind.LISTENER || ep.state != State.OPENING) return@session
+        val bound = ep.kind == Kind.LISTENER || (ep.kind == Kind.UDP && ep === audioListener)
+        if (!bound || ep.state != State.OPENING) return@session
         ep.state = State.OPEN
         ep.port = port
         when (ep) {
@@ -231,7 +240,7 @@ class ReceiverSession internal constructor(
             authConn -> auth = layers.auth()
             dmsdpConn -> {
                 val key = checkNotNull(sessionKey) { "认证成功之前不该开业务 20 监听" }
-                val layer = layers.dmsdp(key, remoteHost)
+                val layer = layers.dmsdp(key, remoteHost, phoneVersion)
                 dmsdp = layer
                 handleDmsdp(call(SessionLayer.DMSDP) { layer.onConnected(DmsdpChannel.SESSION, nowMillis) }, out)
             }
@@ -307,9 +316,19 @@ class ReceiverSession internal constructor(
     override fun onDatagram(id: Int, data: ByteArray, offset: Int, length: Int, nowMillis: Long): List<SessionOutput> =
         session { out ->
             val ep = endpoints[id] ?: return@session
-            if (ep !== keepAlive || ep.state != State.OPEN) return@session
+            if (ep.state != State.OPEN) return@session
             val layer = checkNotNull(dmsdp)
-            handleDmsdp(call(SessionLayer.DMSDP) { layer.onDatagram(data, offset, length, nowMillis) }, out)
+            when {
+                ep === keepAlive -> handleDmsdp(call(SessionLayer.DMSDP) { layer.onDatagram(data, offset, length, nowMillis) }, out)
+                ep === audioListener && ep.kind == Kind.UDP -> {
+                    // UDP 没有「连上」：第一个数据报到达就当手机开始发了，之后每个数据报是完整的一帧，按到达顺序喂。
+                    if (!audioUdpHeard) {
+                        audioUdpHeard = true
+                        handleDmsdp(call(SessionLayer.DMSDP) { layer.onConnected(DmsdpChannel.AUDIO, nowMillis) }, out)
+                    }
+                    handleDmsdp(call(SessionLayer.DMSDP) { layer.feed(DmsdpChannel.AUDIO, data, offset, length, nowMillis) }, out)
+                }
+            }
         }
 
     override fun onClosed(id: Int, nowMillis: Long): List<SessionOutput> = session { out ->
@@ -536,6 +555,7 @@ class ReceiverSession internal constructor(
                     sessionKey = a.sessionKey.copyOf()
                     a.sessionKey.fill(0)
                     authSucceeded = true
+                    phoneVersion = a.phoneVersion
                     out.add(SessionEvent.Authenticated(a.mode))
                     if (pendingDmsdpRequests.isNotEmpty()) {
                         val waiting = ArrayList(pendingDmsdpRequests)
@@ -573,13 +593,19 @@ class ReceiverSession internal constructor(
                 is DmsdpAction.OpenKeepAliveSocket -> openKeepAlive(o.remotePort, out)
                 is DmsdpAction.Connect -> diag(SessionLayer.DMSDP, "文件分享没有启用，忽略连接请求（${o.channel}）", out)
                 is DmsdpAction.Close -> close(dmsdpEndpoint(o.channel), out)
-                DmsdpAction.OpenAudioListeners -> openAudioListeners(out)
+                is DmsdpAction.OpenAudioListeners -> openAudioListeners(o.transport == AudioTransport.UDP, out)
                 DmsdpAction.CloseAudioTransport -> closeAudio(out)
                 DmsdpAction.OpenMicListener -> openMicListener(out)
                 DmsdpAction.CloseMicTransport -> closeMic(out)
                 is DmsdpEvent.EncryptionEnabled -> out.add(SessionEvent.DeviceSessionReady(o.keepAliveMode))
                 is DmsdpEvent.KeepAliveTimeout -> finish(EndReason.KeepAliveTimeout(o.mode), out)
                 is DmsdpEvent.DisplayPortAnnounced -> beginHiSight(o.port, out)
+                is DmsdpEvent.ServiceStatusChanged -> {
+                    diag(SessionLayer.DMSDP, o.toString(), out)
+                    if (o.action == SERVICE_ACTION_PAUSE && o.serviceType == SERVICE_TYPE_DISPLAY) {
+                        out.add(SessionEvent.ProjectionPaused)
+                    }
+                }
                 is DmsdpEvent -> diag(SessionLayer.DMSDP, o.toString(), out)
             }
         }
@@ -611,17 +637,20 @@ class ReceiverSession internal constructor(
      * dmsdp 要为音频数据会话开端口：先关掉上一次的，再在车机 IP 上开数据端口（偶数 P）。
      * SETUP 里写 `client_port=P--1`（第二个是 RTCP 口，写 -1 表示不建），手机先回 200 再连 P。
      */
-    private fun openAudioListeners(out: Out) {
+    private fun openAudioListeners(udp: Boolean, out: Out) {
         closeAudio(out)
         audioAttempts = 0
+        audioUdp = udp
         tryAudioPorts(out)
     }
 
+    /** TCP 时开监听；UDP 时绑 UDP 端口收数据报（手机不连，直接往这里发）。 */
     private fun tryAudioPorts(out: Out) {
         audioAttempts++
         val port = AUDIO_PORT_MIN + 2 * config.random.nextInt((AUDIO_PORT_MAX - AUDIO_PORT_MIN) / 2 + 1)
         audioPort = port
-        audioListener = listen(SessionChannel.AUDIO, config.localIp, port, null, out)
+        audioUdpHeard = false
+        audioListener = if (audioUdp) bindUdp(SessionChannel.AUDIO, config.localIp, port, out) else listen(SessionChannel.AUDIO, config.localIp, port, null, out)
     }
 
     /** 监听开好了才交回 dmsdp 发 SETUP（先监听、后通告）。 */
@@ -649,7 +678,8 @@ class ReceiverSession internal constructor(
             }
             return
         }
-        val connection = ep === audioListener?.accept
+        // UDP 时数据端口本身就是「连接」：收到过数据报之后出错，按数据连接断开处理。
+        val connection = ep === audioListener?.accept || (ep === audioListener && ep.kind == Kind.UDP && audioUdpHeard)
         val wasOpen = ep.state == State.OPEN
         close(ep, out)
         diag(SessionLayer.SESSION, "${ep.channel.label}出错（$message），只影响声音", out)
@@ -751,6 +781,7 @@ class ReceiverSession internal constructor(
                     close(video, out)
                     close(remote, out)
                 }
+                is HiSightOutput.Note -> diag(SessionLayer.HISIGHT, o.text, out)
                 is HiSightOutput.Ended -> {
                     hisightEnded = true
                     finish(EndReason.ProjectionEnded(o.reason), out)
@@ -799,8 +830,13 @@ class ReceiverSession internal constructor(
         if (hs != null && !hisightEnded) {
             hisightEnded = true
             // 投屏层自己判断还能不能发 TEARDOWN（加密已协商、控制连接还在）；发不出去的写会被丢掉。
+            // 出错前已经产生的说明（例如手机的能力选择原文）也在这里交出来，照样写进诊断日志。
             for (o in quietly { hs.shutdown() }) {
-                if (o is HiSightOutput.Send) write(hisightEndpoint(o.channel), o.bytes, out)
+                when (o) {
+                    is HiSightOutput.Send -> write(hisightEndpoint(o.channel), o.bytes, out)
+                    is HiSightOutput.Note -> diag(SessionLayer.HISIGHT, o.text, out)
+                    else -> Unit
+                }
             }
         }
         val d = dmsdp
@@ -873,6 +909,12 @@ class ReceiverSession internal constructor(
         return listener
     }
 
+    private fun bindUdp(channel: SessionChannel, host: String, port: Int, out: Out): Endpoint {
+        val ep = newEndpoint(channel, Kind.UDP)
+        out.add(SessionAction.BindUdp(ep.id, channel, host, port))
+        return ep
+    }
+
     private fun connect(channel: SessionChannel, host: String, port: Int, out: Out): Endpoint {
         val ep = newEndpoint(channel, Kind.TCP)
         ep.remoteHost = host
@@ -903,6 +945,11 @@ class ReceiverSession internal constructor(
     override fun toString() = "ReceiverSession(已结束=$ended, 认证=$authSucceeded, 投屏=${hisight != null}, 帧=$framesDelivered)"
 
     private companion object {
+        /** 设备服务状态通知（命令 103）的动作：202 是服务暂停（投屏界面上点「车机」图标时，手机对显示服务发这个）。 */
+        const val SERVICE_ACTION_PAUSE = 202
+
+        /** 设备服务类型：显示（投屏画面）。 */
+        const val SERVICE_TYPE_DISPLAY = 8L
         /** 音频端口从这个范围里挑偶数（本机的选择：RTP 习惯用偶数口，不是协议规定）。 */
         const val AUDIO_PORT_MIN = 20_000
         const val AUDIO_PORT_MAX = 59_998

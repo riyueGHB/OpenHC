@@ -1,6 +1,7 @@
 package io.github.gcbond.openhc.core.session
 
 import io.github.gcbond.openhc.core.auth.AuthFailure
+import io.github.gcbond.openhc.core.nearby.WifiMode
 import java.util.UUID
 
 /**
@@ -85,33 +86,36 @@ sealed class WirelessAction : WirelessOutput {
     }
 
     /**
-     * 开热点：名称、密码、信道都由系统定，平台把实际值交回。成功调 `onWifiNetworkReady(id, 网络信息)`；
-     * 失败调 `onIoError(id, 说明)`；开好之后热点没了调 `onClosed(id)`。
+     * 建手机要加入的 WiFi 网络：车机开热点，或者建 WiFi 直连组、自己当组主（平台按自己的设置选，交回的
+     * [WifiNetwork.mode] 说明是哪种）。名称、密码、信道以平台交回的实际值为准。成功调 `onWifiNetworkReady(id, 网络信息)`；
+     * 失败调 `onIoError(id, 说明)`；建好之后网络没了调 `onClosed(id)`。
      */
     class StartWifiNetwork(override val id: Int) : WirelessAction() {
         override fun toString() = "StartWifiNetwork($id)"
     }
 
-    /** 关掉 [StartWifiNetwork] 开的热点。 */
+    /** 关掉 [StartWifiNetwork] 建的网络（热点或直连组）。 */
     class StopWifiNetwork(override val id: Int) : WirelessAction() {
         override fun toString() = "StopWifiNetwork($id)"
     }
 }
 
-/** 平台开好热点后交回的实际信息，全部原样写进给手机的连接串。 */
+/** 平台建好网络后交回的实际信息，全部原样写进给手机的连接串。 */
 class WifiNetwork(
-    /** 车机在热点上的 IPv4（热点网关），手机连它。 */
+    /** 车机在这个网络上的 IPv4（热点网关或直连组主），手机连它。 */
     val localIp: String,
-    /** 热点的网络名（SSID）。 */
+    /** 网络名（热点的 SSID，或直连组名）。 */
     val ssid: String,
-    /** 热点网卡的 MAC（BSSID）。 */
+    /** 热点网卡或直连网卡的 MAC（BSSID / 组主 MAC）。 */
     val bssid: String,
     /** WPA2-PSK 明文密码。 */
     val passphrase: String,
     /** 实际的中心频率（MHz）。手机按它找网，应当是真实值；平台读不到真实信道时只能交回推测值。 */
     val frequencyMhz: Int,
+    /** 热点还是直连组，决定连接串的格式。 */
+    val mode: WifiMode = WifiMode.HOTSPOT,
 ) {
-    override fun toString() = "WifiNetwork($localIp, $frequencyMhz MHz，网络名与密码不显示)"
+    override fun toString() = "WifiNetwork(${if (mode == WifiMode.DIRECT) "直连组" else "热点"} $localIp, $frequencyMhz MHz，网络名与密码不显示)"
 }
 
 /** 无线特有的事件，界面和日志用。toString 不含连接码、地址和密码。 */
@@ -149,10 +153,10 @@ sealed class WirelessEvent : WirelessOutput {
     class ConnectionInfoSent(
         val port: Int,
         val phoneMac: String,
-        /** 连接串端口后那一段填的信道号（由报给手机的频率换算）。 */
-        val channel: Int,
+        /** 连接串端口后那一段填的信道号（由报给手机的频率换算）；只有热点格式有，直连为 null。 */
+        val channel: Int?,
     ) : WirelessEvent() {
-        override fun toString() = "ConnectionInfoSent($port，信道 $channel)"
+        override fun toString() = "ConnectionInfoSent($port，${channel?.let { "信道 $it" } ?: "直连"})"
     }
 
     /** 会话结束。只出现一次，总在最后；之前已给出关闭全部资源的动作。 */

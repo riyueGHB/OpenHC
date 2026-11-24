@@ -248,7 +248,8 @@ class NearbySession(
                 else -> handleUnknownLayer(frame.outerType, payload, out)
             }
         } catch (e: MalformedMessageException) {
-            out.add(NearbyEvent.InputDiscarded(e.message ?: "载荷不合法", frame.payloadView().size))
+            // 写明是哪一层，方便看诊断日志时对上是哪条消息。
+            out.add(NearbyEvent.InputDiscarded("外层类型 ${frame.outerType}：${e.message ?: "载荷不合法"}", frame.payloadView().size))
         }
     }
 
@@ -342,7 +343,14 @@ class NearbySession(
         }
     }
 
-    private fun parseLayerItem(outerType: Int, t: Tlv): LayerItem {
+    private fun parseLayerItem(outerType: Int, t: Tlv): LayerItem =
+        try {
+            parseLayerItemValue(outerType, t)
+        } catch (e: MalformedMessageException) {
+            throw MalformedMessageException("命令 ${t.tag}（${t.length} 字节）：${e.message}", e)
+        }
+
+    private fun parseLayerItemValue(outerType: Int, t: Tlv): LayerItem {
         val bluetooth = link == NearbyLink.BLUETOOTH
         return when {
             t.tag == SocketMessages.CMD_CREATE_REQUEST -> LayerItem.Socket(SocketMessages.parseRequest(t.valueView()))

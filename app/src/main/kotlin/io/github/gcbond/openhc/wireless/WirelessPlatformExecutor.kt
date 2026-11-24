@@ -10,6 +10,10 @@ import io.github.gcbond.openhc.core.session.WirelessRunnerBridge
 import io.github.gcbond.openhc.platform.bluetooth.RfcommClient
 import io.github.gcbond.openhc.platform.bluetooth.RfcommEndpoint
 import io.github.gcbond.openhc.platform.bluetooth.RfcommEvents
+import io.github.gcbond.openhc.core.nearby.WifiMode
+import io.github.gcbond.openhc.platform.wifi.DirectGroup
+import io.github.gcbond.openhc.platform.wifi.DirectGroupEvents
+import io.github.gcbond.openhc.platform.wifi.DirectMacSource
 import io.github.gcbond.openhc.platform.wifi.HotspotMacSource
 import io.github.gcbond.openhc.platform.wifi.LocalHotspot
 import io.github.gcbond.openhc.platform.wifi.LocalHotspotEvents
@@ -67,6 +71,8 @@ internal class WirelessPlatformExecutor(
     /** 车机主动连手机（车机主动回连）：[channel] 不为 null 时先按通道号直连，否则按 [uuid] 查 SDP。 */
     private val dialRfcomm: (address: String, uuid: UUID, channel: Int?, events: RfcommClient.Events) -> RfcommEndpoint,
     private val startHotspot: (LocalHotspotEvents) -> LocalHotspotHandle,
+    /** 不为 null 时会话要的网络改建 WiFi 直连组（设置里「无线方式」选了直连）。 */
+    private val startDirect: ((DirectGroupEvents) -> LocalHotspotHandle)? = null,
     private val results: WirelessResults,
     private val onEvent: (WirelessEvent) -> Unit,
     private val log: (String) -> Unit,
@@ -83,6 +89,10 @@ internal class WirelessPlatformExecutor(
     @Volatile
     private var readyHotspot: LocalHotspot? = null
 
+    /** 建好的直连组（日志用）。 */
+    @Volatile
+    private var readyDirect: DirectGroup? = null
+
     /** 桥接的平台回调。 */
     fun execute(output: WirelessOutput) {
         when (output) {
@@ -90,10 +100,19 @@ internal class WirelessPlatformExecutor(
             is WirelessAction.ConnectRfcomm -> dial(output)
             is WirelessAction.RfcommWrite -> write(output)
             is WirelessAction.RfcommClose -> closeRfcomm(output.id)
-            is WirelessAction.StartWifiNetwork -> startLocalHotspot(output.id)
+            is WirelessAction.StartWifiNetwork -> {
+                val direct = startDirect
+                if (direct != null) startDirectGroup(output.id, direct) else startLocalHotspot(output.id)
+            }
             is WirelessAction.StopWifiNetwork -> stopHotspot(output.id)
             is WirelessEvent -> {
-                if (output is WirelessEvent.ConnectionInfoSent) {
+                if (output is WirelessEvent.ConnectionInfoSent && output.channel == null) {
+                    val group = readyDirect
+                    log(
+                        "连接串已发给手机（端口 ${output.port}，直连格式），等手机加入直连组（以手机连上 TCP 端口为准）" +
+                            "（手机报的 MAC ${MacText.mask(output.phoneMac)}；组在 ${group?.frequencyMhz ?: "?"} MHz，${group?.frequencySource ?: "来源未知"}）",
+                    )
+                } else if (output is WirelessEvent.ConnectionInfoSent) {
                     log(
                         "连接串已发给手机（端口 ${output.port}），等手机连上车机热点（以手机连上 TCP 端口为准，热点看不到终端列表）" +
                             "（手机报的 MAC ${MacText.mask(output.phoneMac)}）",
@@ -276,8 +295,34 @@ internal class WirelessPlatformExecutor(
 
     private fun stopHotspot(id: Int) {
         val handle = synchronized(lock) { hotspots.remove(id) } ?: return
-        log("关掉热点")
+        log(if (startDirect != null) "拆掉直连组" else "关掉热点")
         handle.stop()
+    }
+
+    /** 建直连组：建好后交回组名、口令、频率（安卓 6～9 上频率是指定的信道）；连接串用直连格式。 */
+    private fun startDirectGroup(id: Int, factory: (DirectGroupEvents) -> LocalHotspotHandle) {
+        val events = object : DirectGroupEvents {
+            override fun onReady(group: DirectGroup) = ifHotspot(id) {
+                if (group.macSource == DirectMacSource.PLACEHOLDER) log("读不到直连网卡的真实 MAC，连接串里的组主 MAC 用占位值")
+                readyDirect = group
+                results.onWifiNetworkReady(
+                    id,
+                    WifiNetwork(group.localIp, group.networkName, group.ownerMac, group.passphrase, group.frequencyMhz, WifiMode.DIRECT),
+                )
+            }
+
+            override fun onFailed(message: String) = ifHotspot(id) { results.onIoError(id, message) }
+
+            override fun onLost(message: String) = ifHotspot(id) {
+                log(message)
+                results.onClosed(id)
+            }
+        }
+        val handle = factory(events)
+        synchronized(lock) { if (!closed) hotspots[id] = handle }
+        if (isClosed()) return handle.stop()
+        log("开始建直连组（手机已经认证通过）")
+        handle.start()
     }
 
     // ---------------------------------------------------------------- 工具
