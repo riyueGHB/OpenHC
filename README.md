@@ -1,5 +1,7 @@
 # OpenHC
 
+！！！！！！！！！！！！！近期不在更新，我要玩 GTA6 了🤣！！！！！！！！！！！！
+
 **开源的 HiCar 车机端。** 装在安卓车机上，华为手机用数据线或无线投屏到车机屏幕。
 
 [下载安装包](https://github.com/GGBondLab/OpenHC/releases/latest) · [更新记录](CHANGELOG.md) · [常见问题](#常见问题) · [报告问题](https://github.com/GGBondLab/OpenHC/issues) · [从源码构建](#构建)
